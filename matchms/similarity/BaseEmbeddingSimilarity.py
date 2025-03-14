@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Iterable, Union, Optional, Dict, Any, Tuple
+from typing import List, Iterable, Literal, Union, Optional, Dict, Any, Tuple
 from pathlib import Path
 from abc import abstractmethod
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
@@ -12,6 +12,10 @@ try:
 except ImportError:
     pynndescent = None
 
+try:
+    import faiss
+except ImportError:
+    pynndescent = None
 
 class BaseEmbeddingSimilarity(BaseSimilarity):
     """Base class for similarity measures that work with embeddings.
@@ -166,7 +170,7 @@ class BaseEmbeddingSimilarity(BaseSimilarity):
             reference_spectra: Optional[Iterable[SpectrumType]] = None,
             embeddings_path: Optional[Union[str, Path]] = None,
             k: int = 100,
-            index_backend: str = "pynndescent",
+            index_backend: Literal["pynndescent","faiss"] = "pynndescent",
             **index_kwargs
         ) -> Any:
         """Build an ANN index for the reference spectra.
@@ -180,7 +184,7 @@ class BaseEmbeddingSimilarity(BaseSimilarity):
         k : int, optional
             Number of nearest neighbors to use for the ANN index.
         index_backend : str, optional
-            Backend to use for ANN index. Currently only "pynndescent" is supported.
+            Backend to use for ANN index.
         **index_kwargs
             Additional keyword arguments passed to the index constructor.
 
@@ -208,8 +212,16 @@ class BaseEmbeddingSimilarity(BaseSimilarity):
 
             # Build ANN index
             index = pynndescent.NNDescent(embs_ref, metric=self.similarity, n_neighbors=k, **index_kwargs)
+        elif index_backend == 'faiss':
+            if not faiss:
+                raise ImportError("faiss-cpu is not installed. Please install it with `pip install faiss-cpu`.")
+            self.index_backend = index_backend
+            self.index_k = k
+            self.index_kwargs = index_kwargs
+            # Not the most efficient choice.See https://github.com/facebookresearch/faiss/wiki/Guidelines-to-choose-an-index#if-100m---1b-ivf1048576_hnsw32
+            index = faiss.IndexFlatL2(d=embs_ref.shape[-1]) # Assuming embedding dimension is last
         else:
-            raise ValueError(f"Only pynndescent is supported for now. Got {index_backend}.")
+            raise ValueError(f"Unsupported index_backend ({index_backend}).")
 
         # Keep index in memory
         self.index = index
@@ -258,6 +270,9 @@ class BaseEmbeddingSimilarity(BaseSimilarity):
         if self.index_backend == "pynndescent":
             neighbors, distances = self.index.query(embs_query, k=k)
             similarities = self._distances_to_similarities(distances)
+        elif self.index_backend == "faiss":
+            distances, neighbors = self.index.search(embs_query, k=k) # (D)istance, and (I)ndex to neigh
+            similarities = self._distances_to_similarities(distances)
         else:
             raise ValueError(f"Only pynndescent is supported for now. Got {self.index_backend}.")
         return neighbors, similarities
@@ -278,8 +293,14 @@ class BaseEmbeddingSimilarity(BaseSimilarity):
         if self.index_backend == "pynndescent":
             neighbors, distances = self.index.neighbor_graph
             similarities = self._distances_to_similarities(distances)
-            return neighbors, similarities
-        raise ValueError(f"Only pynndescent is supported for now. Got {self.index_backend}.")
+        elif self.index_backend == "faiss":
+            raise NotImplementedError
+            distances, neighbors = self.index.search(embs_query, k=k) # (D)istance, and (I)ndex to neigh
+            similarities = self._distances_to_similarities(distances)
+        else:
+            raise ValueError(f"Only pynndescent is supported for now. Got {self.index_backend}.")
+        return neighbors, similarities
+    
 
     def _distances_to_similarities(self, distances: np.ndarray) -> np.ndarray:
         """Convert distances to similarities based on similarity metric.
